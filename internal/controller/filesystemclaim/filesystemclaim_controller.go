@@ -93,10 +93,11 @@ const (
 	ReasonProvisioningSucceeded  = "ProvisioningSucceeded"
 	ReasonProvisioningInProgress = "ProvisioningInProgress"
 
-	ReasonValidationFailed  = "ValidationFailed"
-	ReasonDeviceNotFound    = "DeviceNotFound"
-	ReasonDeviceInUse       = "DeviceInUse"
-	ReasonDeletionRequested = "DeletionRequested"
+	ReasonValidationFailed       = "ValidationFailed"
+	ReasonDeviceNotFound         = "DeviceNotFound"
+	ReasonDeviceInUse            = "DeviceInUse"
+	ReasonDeletionRequested      = "DeletionRequested"
+	ReasonImmutableFieldModified = "ImmutableFieldModified"
 
 	// IBM Spectrum Scale resource information
 	LocalDiskGroup   = "scale.spectrum.ibm.com"
@@ -303,8 +304,59 @@ func (r *FileSystemClaimReconciler) handleDeletion(ctx context.Context, fsc *fus
 func (r *FileSystemClaimReconciler) ensureLocalDisks(ctx context.Context, fsc *fusionv1alpha1.FileSystemClaim) (bool, error) {
 	logger := log.FromContext(ctx)
 
-	// If LocalDisks are already created, no need to create them again
+	// If LocalDisks are already created, verify spec.devices hasn't changed
+	// This is a safety check in case the webhook is disabled or bypassed
 	if r.isConditionTrue(fsc, ConditionTypeLocalDiskCreated) {
+		// Get owned LocalDisks and verify they match current spec.devices
+		owned, err := r.listOwnedResources(ctx, fsc, schema.GroupVersionKind{
+			Group:   LocalDiskGroup,
+			Version: LocalDiskVersion,
+			Kind:    LocalDiskKind,
+		}, LocalDiskList)
+		if err != nil {
+			return false, fmt.Errorf("failed to list owned LocalDisks: %w", err)
+		}
+
+		// Extract device paths from owned LocalDisks
+		ownedDevices := make(map[string]struct{})
+		for _, ld := range owned {
+			devicePath, _, _ := unstructured.NestedString(ld.Object, "spec", "device")
+			if devicePath != "" {
+				ownedDevices[devicePath] = struct{}{}
+			}
+		}
+
+		// Check if spec.devices matches owned LocalDisks
+		specDevices := make(map[string]struct{})
+		for _, device := range fsc.Spec.Devices {
+			specDevices[device] = struct{}{}
+		}
+
+		// Compare the two sets
+		if !reflect.DeepEqual(ownedDevices, specDevices) {
+			errMsg := fmt.Sprintf("spec.devices was modified after LocalDisks were created. "+
+				"Original: %v, Current: %v. "+
+				"Either delete this FileSystemClaim (%s) and create new with desired devices, "+
+				"or create a new FileSystemClaim with UNUSED and AVAILABLE shared devices.",
+				mapKeysToSlice(ownedDevices), fsc.Spec.Devices, fsc.Name)
+			logger.Error(nil, errMsg)
+
+			// Set error condition
+			if e := r.patchFSCStatus(ctx, fsc, func(cur *fusionv1alpha1.FileSystemClaim) {
+				cur.Status.Conditions = utils.UpdateCondition(
+					cur.Status.Conditions,
+					ConditionTypeReady,
+					metav1.ConditionFalse,
+					ReasonImmutableFieldModified,
+					errMsg,
+					cur.Generation,
+				)
+			}); e != nil {
+				return false, e
+			}
+			return true, nil
+		}
+
 		return false, nil
 	}
 
@@ -725,6 +777,15 @@ func (r *FileSystemClaimReconciler) syncFSCReady(ctx context.Context, fsc *fusio
 // Handlers for FileSystemClaim reconciliation -- END
 
 // Helper functions -- START
+
+// mapKeysToSlice converts map keys to a slice
+func mapKeysToSlice(m map[string]struct{}) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
 
 // hasConditionWithReason checks if a condition exists with the given type and reason
 func (r *FileSystemClaimReconciler) hasConditionWithReason(conds []metav1.Condition, condType, reason string) bool {
