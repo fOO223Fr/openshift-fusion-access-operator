@@ -57,41 +57,45 @@ wait_for_catalogsource_ready() {
     local max_retries=${3:-60}  # Maximum retries (default: 60 = 10 minutes)
     local retry_count=0
 
-    echo "⏳ Waiting for CatalogSource ${catalogsource_name} pod to be ready..."
+    echo "⏳ Waiting for CatalogSource ${catalogsource_name} to be fully ready..."
     while [ $retry_count -lt $max_retries ]; do
         set +e
         # Check if CatalogSource exists
         oc get catalogsource "${catalogsource_name}" -n "${namespace}" &> /dev/null
         cs_exists=$?
         
+        if [ $cs_exists -ne 0 ]; then
+            echo "⚠️  CatalogSource ${catalogsource_name} not found in namespace ${namespace}, retrying... (attempt $((retry_count + 1))/$max_retries)"
+            retry_count=$((retry_count + 1))
+            sleep 10
+            continue
+        fi
+
         # Check if pod exists and is ready
         POD_STATUS=$(oc get pod -n "${namespace}" -l "olm.catalogSource=${catalogsource_name}" -o jsonpath='{.items[0].status.phase}' 2>/dev/null)
         POD_READY=$(oc get pod -n "${namespace}" -l "olm.catalogSource=${catalogsource_name}" -o jsonpath='{.items[0].status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)
         POD_NAME=$(oc get pod -n "${namespace}" -l "olm.catalogSource=${catalogsource_name}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+        
+        # Check CatalogSource connection state (this is the critical check)
+        CS_STATUS=$(oc get catalogsource "${catalogsource_name}" -n "${namespace}" -o jsonpath='{.status.connectionState.lastObservedState}' 2>/dev/null)
+        CS_GRPC_STATUS=$(oc get catalogsource "${catalogsource_name}" -n "${namespace}" -o jsonpath='{.status.grpcConnectionState.lastObservedState}' 2>/dev/null)
         set -e
 
-        if [ $cs_exists -ne 0 ]; then
-            echo "⚠️  CatalogSource ${catalogsource_name} not found in namespace ${namespace}, retrying... (attempt $((retry_count + 1))/$max_retries)"
-        elif [ -z "${POD_NAME}" ]; then
+        if [ -z "${POD_NAME}" ]; then
             echo "⏳ CatalogSource pod not found yet, waiting... (attempt $((retry_count + 1))/$max_retries)"
         elif [ "${POD_STATUS}" != "Running" ]; then
             echo "⏳ CatalogSource pod ${POD_NAME} status: ${POD_STATUS}, waiting... (attempt $((retry_count + 1))/$max_retries)"
         elif [ "${POD_READY}" != "True" ]; then
             echo "⏳ CatalogSource pod ${POD_NAME} not ready yet, waiting... (attempt $((retry_count + 1))/$max_retries)"
+        elif [ "${CS_STATUS}" != "READY" ] && [ "${CS_GRPC_STATUS}" != "READY" ]; then
+            # Wait for connection state to be READY - this is critical for gRPC to work
+            echo "⏳ CatalogSource pod ready, but connection state: ${CS_STATUS:-Unknown}/${CS_GRPC_STATUS:-Unknown}, waiting for READY... (attempt $((retry_count + 1))/$max_retries)"
         else
             echo "✅ CatalogSource ${catalogsource_name} pod ${POD_NAME} is ready!"
-            # Additional check: verify CatalogSource status shows it's healthy
-            set +e
-            CS_STATUS=$(oc get catalogsource "${catalogsource_name}" -n "${namespace}" -o jsonpath='{.status.connectionState.lastObservedState}' 2>/dev/null)
-            if [ "${CS_STATUS}" = "READY" ]; then
-                echo "✅ CatalogSource ${catalogsource_name} is READY!"
-                break
-            else
-                echo "⏳ CatalogSource connection state: ${CS_STATUS:-Unknown}, waiting... (attempt $((retry_count + 1))/$max_retries)"
-            fi
-            set -e
-            # If pod is ready, give it a moment and proceed
-            sleep 5
+            echo "✅ CatalogSource connection state: ${CS_STATUS:-${CS_GRPC_STATUS}}"
+            # Wait an additional 10 seconds to ensure gRPC service is fully operational
+            echo "⏳ Waiting additional 10 seconds for gRPC service to stabilize..."
+            sleep 10
             break
         fi
 
@@ -100,12 +104,111 @@ wait_for_catalogsource_ready() {
     done
 
     if [ $retry_count -eq $max_retries ]; then
-        echo "❌ Error: CatalogSource ${catalogsource_name} pod was not ready after $max_retries attempts (10 minutes)"
+        echo "❌ Error: CatalogSource ${catalogsource_name} was not ready after $max_retries attempts (10 minutes)"
         echo "Checking CatalogSource status:"
         oc get catalogsource "${catalogsource_name}" -n "${namespace}" -o yaml || true
+        echo ""
         echo "Checking CatalogSource pod:"
         oc get pod -n "${namespace}" -l "olm.catalogSource=${catalogsource_name}" || true
+        echo ""
+        echo "Checking CatalogSource pod logs (last 30 lines):"
+        POD_NAME=$(oc get pod -n "${namespace}" -l "olm.catalogSource=${catalogsource_name}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+        if [ -n "${POD_NAME}" ]; then
+            oc logs -n "${namespace}" "${POD_NAME}" --tail=30 || true
+        fi
         return 1
+    fi
+}
+
+create_catalog_pull_secret() {
+    echo "Setting up image pull secret for CatalogSource..."
+    # Extract registry from REGISTRY (e.g., quay.io/rh-ee-nlevanon -> quay.io)
+    REGISTRY_HOST=$(echo "${REGISTRY}" | cut -d'/' -f1)
+    
+    # Check if we need authentication (quay.io usually requires auth)
+    if [[ "${REGISTRY_HOST}" == "quay.io" ]]; then
+        echo "Detected quay.io registry, setting up pull secret..."
+        
+        # Check if secret already exists
+        if oc get secret quay-pull-secret -n openshift-marketplace &>/dev/null; then
+            echo "✅ Pull secret already exists in openshift-marketplace"
+        else
+            echo "Creating pull secret from podman credentials..."
+            # Get username from podman
+            QUAY_USER=$(podman login --get-login quay.io 2>/dev/null || echo "")
+            
+            if [ -z "${QUAY_USER}" ]; then
+                echo "⚠️  Could not get quay.io username from podman login"
+                echo "⚠️  Please create the pull secret manually:"
+                echo "   oc create secret docker-registry quay-pull-secret \\"
+                echo "     --docker-server=quay.io \\"
+                echo "     --docker-username=<your-username> \\"
+                echo "     --docker-password=<your-token> \\"
+                echo "     --docker-email=\"\" \\"
+                echo "     -n openshift-marketplace"
+                return 1
+            fi
+            
+            # Try to extract password from auth.json if available
+            AUTH_FILE="${HOME}/.config/containers/auth.json"
+            if [ -f "${AUTH_FILE}" ] && command -v jq &> /dev/null; then
+                QUAY_AUTH=$(jq -r ".auths.\"quay.io\".auth // empty" "${AUTH_FILE}" 2>/dev/null || echo "")
+                if [ -n "${QUAY_AUTH}" ]; then
+                    # Decode base64 and extract password (format: username:password)
+                    DECODED=$(echo "${QUAY_AUTH}" | base64 -d 2>/dev/null || echo "")
+                    QUAY_PASSWORD=$(echo "${DECODED}" | cut -d':' -f2)
+                fi
+            fi
+            
+            # If still no password, provide instructions
+            if [ -z "${QUAY_PASSWORD}" ]; then
+                echo "⚠️  Could not automatically extract quay.io credentials"
+                echo "⚠️  Please create the pull secret manually before running this script:"
+                echo ""
+                echo "   oc create secret docker-registry quay-pull-secret \\"
+                echo "     --docker-server=quay.io \\"
+                echo "     --docker-username=${QUAY_USER} \\"
+                echo "     --docker-password=<your-token-or-password> \\"
+                echo "     --docker-email=\"\" \\"
+                echo "     -n openshift-marketplace"
+                echo ""
+                echo "   oc patch serviceaccount default -n openshift-marketplace \\"
+                echo "     --type='json' \\"
+                echo "     -p='[{\"op\": \"add\", \"path\": \"/imagePullSecrets/-\", \"value\": {\"name\": \"quay-pull-secret\"}}]'"
+                echo ""
+                return 1
+            fi
+            
+            # Create docker-registry secret
+            oc create secret docker-registry quay-pull-secret \
+                --docker-server=quay.io \
+                --docker-username="${QUAY_USER}" \
+                --docker-password="${QUAY_PASSWORD}" \
+                --docker-email="" \
+                -n openshift-marketplace || {
+                echo "⚠️  Failed to create pull secret"
+                return 1
+            }
+            
+            echo "✅ Pull secret created successfully"
+        fi
+        
+        # Add secret to default service account in openshift-marketplace
+        echo "Adding pull secret to default service account..."
+        oc patch serviceaccount default -n openshift-marketplace \
+            --type='json' \
+            -p='[{"op": "add", "path": "/imagePullSecrets/-", "value": {"name": "quay-pull-secret"}}]' 2>/dev/null || {
+            # Check if it's already there
+            if oc get serviceaccount default -n openshift-marketplace -o jsonpath='{.imagePullSecrets[*].name}' | grep -q quay-pull-secret; then
+                echo "✅ Pull secret already added to service account"
+            else
+                echo "⚠️  Failed to add pull secret to service account (may already exist)"
+            fi
+        }
+        
+        echo "✅ Image pull secret configured for openshift-marketplace namespace"
+    else
+        echo "Registry ${REGISTRY_HOST} detected, skipping pull secret setup"
     fi
 }
 
@@ -163,6 +266,9 @@ fi
 make VERSION=${VERSION} IMAGE_TAG_BASE=${REGISTRY}/openshift-fusion-access CHANNELS=fast USE_IMAGE_DIGESTS="" \
     manifests bundle generate docker-build docker-push bundle-build bundle-push console-build console-push \
     devicefinder-docker-build devicefinder-docker-push catalog-build catalog-push catalog-install
+
+# Setup image pull secret for CatalogSource if needed
+create_catalog_pull_secret || echo "⚠️  Pull secret setup skipped, ensure images are publicly accessible or configure manually"
 
 echo "Waiting for CatalogSource to be ready before proceeding..."
 wait_for_catalogsource_ready "${CATALOGSOURCE}" "openshift-marketplace"
