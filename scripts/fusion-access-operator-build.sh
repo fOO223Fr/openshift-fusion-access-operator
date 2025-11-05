@@ -51,6 +51,64 @@ wait_for_resource() {
     fi
 }
 
+wait_for_catalogsource_ready() {
+    local catalogsource_name=$1
+    local namespace=${2:-openshift-marketplace}
+    local max_retries=${3:-60}  # Maximum retries (default: 60 = 10 minutes)
+    local retry_count=0
+
+    echo "⏳ Waiting for CatalogSource ${catalogsource_name} pod to be ready..."
+    while [ $retry_count -lt $max_retries ]; do
+        set +e
+        # Check if CatalogSource exists
+        oc get catalogsource "${catalogsource_name}" -n "${namespace}" &> /dev/null
+        cs_exists=$?
+        
+        # Check if pod exists and is ready
+        POD_STATUS=$(oc get pod -n "${namespace}" -l "olm.catalogSource=${catalogsource_name}" -o jsonpath='{.items[0].status.phase}' 2>/dev/null)
+        POD_READY=$(oc get pod -n "${namespace}" -l "olm.catalogSource=${catalogsource_name}" -o jsonpath='{.items[0].status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)
+        POD_NAME=$(oc get pod -n "${namespace}" -l "olm.catalogSource=${catalogsource_name}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+        set -e
+
+        if [ $cs_exists -ne 0 ]; then
+            echo "⚠️  CatalogSource ${catalogsource_name} not found in namespace ${namespace}, retrying... (attempt $((retry_count + 1))/$max_retries)"
+        elif [ -z "${POD_NAME}" ]; then
+            echo "⏳ CatalogSource pod not found yet, waiting... (attempt $((retry_count + 1))/$max_retries)"
+        elif [ "${POD_STATUS}" != "Running" ]; then
+            echo "⏳ CatalogSource pod ${POD_NAME} status: ${POD_STATUS}, waiting... (attempt $((retry_count + 1))/$max_retries)"
+        elif [ "${POD_READY}" != "True" ]; then
+            echo "⏳ CatalogSource pod ${POD_NAME} not ready yet, waiting... (attempt $((retry_count + 1))/$max_retries)"
+        else
+            echo "✅ CatalogSource ${catalogsource_name} pod ${POD_NAME} is ready!"
+            # Additional check: verify CatalogSource status shows it's healthy
+            set +e
+            CS_STATUS=$(oc get catalogsource "${catalogsource_name}" -n "${namespace}" -o jsonpath='{.status.connectionState.lastObservedState}' 2>/dev/null)
+            if [ "${CS_STATUS}" = "READY" ]; then
+                echo "✅ CatalogSource ${catalogsource_name} is READY!"
+                break
+            else
+                echo "⏳ CatalogSource connection state: ${CS_STATUS:-Unknown}, waiting... (attempt $((retry_count + 1))/$max_retries)"
+            fi
+            set -e
+            # If pod is ready, give it a moment and proceed
+            sleep 5
+            break
+        fi
+
+        retry_count=$((retry_count + 1))
+        sleep 10
+    done
+
+    if [ $retry_count -eq $max_retries ]; then
+        echo "❌ Error: CatalogSource ${catalogsource_name} pod was not ready after $max_retries attempts (10 minutes)"
+        echo "Checking CatalogSource status:"
+        oc get catalogsource "${catalogsource_name}" -n "${namespace}" -o yaml || true
+        echo "Checking CatalogSource pod:"
+        oc get pod -n "${namespace}" -l "olm.catalogSource=${catalogsource_name}" || true
+        return 1
+    fi
+}
+
 apply_subscription() {
     echo "Creating/updating namespace and subscription resources..."
     # Delete existing subscription if it exists (this is safe to do)
@@ -106,6 +164,9 @@ make VERSION=${VERSION} IMAGE_TAG_BASE=${REGISTRY}/openshift-fusion-access CHANN
     manifests bundle generate docker-build docker-push bundle-build bundle-push console-build console-push \
     devicefinder-docker-build devicefinder-docker-push catalog-build catalog-push catalog-install
 
+echo "Waiting for CatalogSource to be ready before proceeding..."
+wait_for_catalogsource_ready "${CATALOGSOURCE}" "openshift-marketplace"
+
 wait_for_resource "packagemanifest" "${OPERATOR}" "" "${CATALOGSOURCE}"
 apply_subscription
 wait_for_resource "operator" "${OPERATOR}" "${NS}"
@@ -129,8 +190,18 @@ while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
         # Check subscription status for debugging
         set +e
         SUB_STATUS=$(oc get subscription "${OPERATOR}" -n "${NS}" -o jsonpath='{.status.conditions[?(@.type=="CatalogSourcesUnhealthy")].message}' 2>/dev/null || echo "")
+        RESOLUTION_ERROR=$(oc get subscription "${OPERATOR}" -n "${NS}" -o jsonpath='{.status.conditions[?(@.type=="ResolutionFailed")].message}' 2>/dev/null || echo "")
         if [ -n "${SUB_STATUS}" ]; then
             echo "   Subscription status: ${SUB_STATUS}"
+        fi
+        if [ -n "${RESOLUTION_ERROR}" ]; then
+            echo "   ⚠️  Resolution error: ${RESOLUTION_ERROR}"
+            # If there's a resolution error, check CatalogSource pod status
+            CS_POD=$(oc get pod -n openshift-marketplace -l "olm.catalogSource=${CATALOGSOURCE}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+            if [ -n "${CS_POD}" ]; then
+                CS_POD_STATUS=$(oc get pod -n openshift-marketplace "${CS_POD}" -o jsonpath='{.status.phase}' 2>/dev/null || echo "Unknown")
+                echo "   CatalogSource pod ${CS_POD} status: ${CS_POD_STATUS}"
+            fi
         fi
         set -e
     fi
