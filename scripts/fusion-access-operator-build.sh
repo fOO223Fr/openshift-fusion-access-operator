@@ -12,7 +12,7 @@ wait_for_resource() {
     local name=$2           # Name of the resource (e.g., Operator or CSV)
     local namespace=$3      # Namespace (optional, required for CSV and Operator)
     local label=$4          # Label selector (only for packagemanifests)
-    local max_retries=${5:-60}  # Maximum retries (default: 60 = 10 minutes)
+    local max_retries=${5:-30}  # Maximum retries (default: 30 = 5 minutes)
     local retry_count=0
 
     echo "⏳ Waiting for $resource_type: $name"
@@ -46,7 +46,7 @@ wait_for_resource() {
     done
 
     if [ $retry_count -eq $max_retries ]; then
-        echo "❌ Error: $resource_type $name was not available after $max_retries attempts (10 minutes)"
+        echo "❌ Error: $resource_type $name was not available after $max_retries attempts (5 minutes)"
         return 1
     fi
 }
@@ -54,7 +54,7 @@ wait_for_resource() {
 wait_for_catalogsource_ready() {
     local catalogsource_name=$1
     local namespace=${2:-openshift-marketplace}
-    local max_retries=${3:-60}  # Maximum retries (default: 60 = 10 minutes)
+    local max_retries=${3:-30}  # Maximum retries (default: 30 = 5 minutes)
     local retry_count=0
 
     echo "⏳ Waiting for CatalogSource ${catalogsource_name} to be fully ready..."
@@ -90,6 +90,12 @@ wait_for_catalogsource_ready() {
         elif [ "${CS_STATUS}" != "READY" ] && [ "${CS_GRPC_STATUS}" != "READY" ]; then
             # Wait for connection state to be READY - this is critical for gRPC to work
             echo "⏳ CatalogSource pod ready, but connection state: ${CS_STATUS:-Unknown}/${CS_GRPC_STATUS:-Unknown}, waiting for READY... (attempt $((retry_count + 1))/$max_retries)"
+            # If in TRANSIENT_FAILURE or error state, show pod details for debugging
+            if [[ "${CS_STATUS}" == "TRANSIENT_FAILURE" ]] || [[ "${CS_STATUS}" == "CONNECTING" ]]; then
+                echo "   Checking pod status..."
+                oc get pod "${POD_NAME}" -n "${namespace}" -o jsonpath='{.status.phase}' 2>/dev/null | xargs -I {} echo "   Pod phase: {}" || true
+                oc get pod "${POD_NAME}" -n "${namespace}" -o jsonpath='{.status.containerStatuses[0].state}' 2>/dev/null | xargs -I {} echo "   Container state: {}" || true
+            fi
         else
             echo "✅ CatalogSource ${catalogsource_name} pod ${POD_NAME} is ready!"
             echo "✅ CatalogSource connection state: ${CS_STATUS:-${CS_GRPC_STATUS}}"
@@ -104,7 +110,7 @@ wait_for_catalogsource_ready() {
     done
 
     if [ $retry_count -eq $max_retries ]; then
-        echo "❌ Error: CatalogSource ${catalogsource_name} was not ready after $max_retries attempts (10 minutes)"
+        echo "❌ Error: CatalogSource ${catalogsource_name} was not ready after $max_retries attempts (5 minutes)"
         echo "Checking CatalogSource status:"
         oc get catalogsource "${catalogsource_name}" -n "${namespace}" -o yaml || true
         echo ""
@@ -234,6 +240,28 @@ cleanup_old_catalogsource() {
     echo "✅ Cleanup completed"
 }
 
+verify_catalog_image() {
+    echo "Verifying catalog image exists and is accessible..."
+    local catalog_image="${REGISTRY}/openshift-fusion-access-catalog:${VERSION}"
+    
+    # Try to pull the image locally to verify it exists
+    if command -v podman &> /dev/null; then
+        echo "Checking if catalog image exists: ${catalog_image}"
+        if podman pull "${catalog_image}" &>/dev/null; then
+            echo "✅ Catalog image exists and is accessible"
+            return 0
+        else
+            echo "⚠️  Warning: Could not pull catalog image ${catalog_image}"
+            echo "   This might be due to authentication issues or the image doesn't exist"
+            echo "   The script will continue, but the CatalogSource may fail to start"
+            return 1
+        fi
+    else
+        echo "⚠️  podman not found, skipping image verification"
+        return 0
+    fi
+}
+
 apply_subscription() {
     echo "Creating/updating namespace and subscription resources..."
     # Delete existing subscription if it exists (this is safe to do)
@@ -289,14 +317,17 @@ make VERSION=${VERSION} IMAGE_TAG_BASE=${REGISTRY}/openshift-fusion-access CHANN
     manifests bundle generate docker-build docker-push bundle-build bundle-push console-build console-push \
     devicefinder-docker-build devicefinder-docker-push catalog-build catalog-push
 
+# Verify catalog image exists before proceeding
+verify_catalog_image || echo "⚠️  Image verification failed, continuing anyway..."
+
+# Setup image pull secret for CatalogSource if needed (do this BEFORE creating CatalogSource)
+create_catalog_pull_secret || echo "⚠️  Pull secret setup skipped, ensure images are publicly accessible or configure manually"
+
 # Clean up old CatalogSource resources before creating new ones
 cleanup_old_catalogsource "${CATALOGSOURCE}" "openshift-marketplace"
 
 # Install the new CatalogSource
 make VERSION=${VERSION} IMAGE_TAG_BASE=${REGISTRY}/openshift-fusion-access catalog-install
-
-# Setup image pull secret for CatalogSource if needed
-create_catalog_pull_secret || echo "⚠️  Pull secret setup skipped, ensure images are publicly accessible or configure manually"
 
 echo "Waiting for CatalogSource to be ready before proceeding..."
 wait_for_catalogsource_ready "${CATALOGSOURCE}" "openshift-marketplace"
@@ -306,7 +337,7 @@ apply_subscription
 wait_for_resource "operator" "${OPERATOR}" "${NS}"
 
 echo "⏳ Waiting for Subscription to install CSV..."
-MAX_RETRIES=60
+MAX_RETRIES=30
 RETRY_COUNT=0
 while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
     set +e
@@ -345,7 +376,7 @@ while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
 done
 
 if [ -z "${INSTALLED_CSV}" ]; then
-    echo "❌ Error: CSV was not installed after $MAX_RETRIES attempts (10 minutes)"
+    echo "❌ Error: CSV was not installed after $MAX_RETRIES attempts (5 minutes)"
     echo "Checking subscription status:"
     oc get subscription "${OPERATOR}" -n "${NS}" -o yaml || true
     exit 1

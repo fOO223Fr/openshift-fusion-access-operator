@@ -212,6 +212,10 @@ build: manifests generate fmt vet ## Build manager binary.
 run: manifests generate fmt vet ## Run a controller from your host.
 	GOOS=${GOOS} GOARCH=${GOARCH} hack/build.sh run
 
+.PHONY: clean-docker
+clean-docker: ## Clean up all resources created by fusion-access-operator-build.sh script (handles finalizers)
+	@./scripts/cleanup-resources.sh
+
 .PHONY: clean
 clean: ## Remove build artifacts
 	rm -rf ./bundle
