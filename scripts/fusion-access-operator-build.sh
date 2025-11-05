@@ -212,6 +212,28 @@ create_catalog_pull_secret() {
     fi
 }
 
+cleanup_old_catalogsource() {
+    echo "Cleaning up old CatalogSource resources..."
+    local catalogsource_name=$1
+    local namespace=${2:-openshift-marketplace}
+    
+    # Delete old CatalogSource pods (they will be recreated automatically)
+    echo "Deleting old CatalogSource pods..."
+    oc delete pod -n "${namespace}" -l "olm.catalogSource=${catalogsource_name}" --ignore-not-found=true || true
+    
+    # Wait a moment for pods to be deleted
+    sleep 5
+    
+    # Delete the CatalogSource itself (it will be recreated by catalog-install)
+    echo "Deleting old CatalogSource resource..."
+    oc delete catalogsource "${catalogsource_name}" -n "${namespace}" --ignore-not-found=true || true
+    
+    # Wait for cleanup to complete
+    sleep 3
+    
+    echo "✅ Cleanup completed"
+}
+
 apply_subscription() {
     echo "Creating/updating namespace and subscription resources..."
     # Delete existing subscription if it exists (this is safe to do)
@@ -265,7 +287,13 @@ fi
 
 make VERSION=${VERSION} IMAGE_TAG_BASE=${REGISTRY}/openshift-fusion-access CHANNELS=fast USE_IMAGE_DIGESTS="" \
     manifests bundle generate docker-build docker-push bundle-build bundle-push console-build console-push \
-    devicefinder-docker-build devicefinder-docker-push catalog-build catalog-push catalog-install
+    devicefinder-docker-build devicefinder-docker-push catalog-build catalog-push
+
+# Clean up old CatalogSource resources before creating new ones
+cleanup_old_catalogsource "${CATALOGSOURCE}" "openshift-marketplace"
+
+# Install the new CatalogSource
+make VERSION=${VERSION} IMAGE_TAG_BASE=${REGISTRY}/openshift-fusion-access catalog-install
 
 # Setup image pull secret for CatalogSource if needed
 create_catalog_pull_secret || echo "⚠️  Pull secret setup skipped, ensure images are publicly accessible or configure manually"
