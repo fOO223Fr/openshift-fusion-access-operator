@@ -8,14 +8,21 @@ USER root
 ENV NODE_OPTIONS="--max-old-space-size=4096"
 
 WORKDIR /opt/app-root/src
-COPY console/ .
-# replace version in package.json
-RUN sed -r -i "s|\"version\": \"0.0.1\"|\"version\": \"${VERSION}\"|;" ./package.json
 
-# Clear npm cache and install ALL dependencies (including devDependencies needed for build)
-# Note: npm ci installs devDependencies by default unless --production is used
-RUN npm cache clean --force
+# Copy package files first for better layer caching
+# This allows npm install to be cached if dependencies haven't changed
+COPY console/package.json console/package-lock.json* ./
+
+# Install dependencies (this layer will be cached if package.json hasn't changed)
 RUN npm ci
+
+# Now copy the rest of the console code
+# Note: This will overwrite package.json, but we modify it anyway below
+# node_modules from npm ci will be preserved since COPY only adds/updates files
+COPY console/ .
+
+# Replace version in package.json
+RUN sed -r -i "s|\"version\": \"0.0.1\"|\"version\": \"${VERSION}\"|;" ./package.json
 
 # Run build with explicit memory settings and production mode
 RUN NODE_ENV=production NODE_OPTIONS="--max-old-space-size=4096" npm run build

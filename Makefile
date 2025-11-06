@@ -248,7 +248,12 @@ generate-dockerfile-console-plugin:
 TARGETARCH ?= amd64
 .PHONY: docker-build
 docker-build: generate-dockerfile-operator ## Build docker image with the manager.
-	$(CONTAINER_TOOL) build --build-arg TARGETARCH=$(TARGETARCH) -t $(OPERATOR_IMG) -f $(CURPATH)/$(OPERATOR_DOCKERFILE) .
+	@echo "Building operator image with cache optimization..."
+	@CACHE_FROM=""; \
+	if $(CONTAINER_TOOL) pull $(IMAGE_TAG_BASE)-operator:latest 2>/dev/null; then \
+		CACHE_FROM="--cache-from $(IMAGE_TAG_BASE)-operator:latest"; \
+	fi; \
+	$(CONTAINER_TOOL) build --build-arg TARGETARCH=$(TARGETARCH) $$CACHE_FROM -t $(OPERATOR_IMG) -f $(CURPATH)/$(OPERATOR_DOCKERFILE) .
 	$(CONTAINER_TOOL) tag $(OPERATOR_IMG) $(IMAGE_TAG_BASE)-operator:latest
 
 .PHONY: docker-push
@@ -258,14 +263,26 @@ docker-push: ## Push docker image with the manager.
 
 .PHONY: console-build
 console-build: generate-dockerfile-console-plugin ## Build the console image
-	$(CONTAINER_TOOL) build -f $(CURPATH)/$(CONSOLE_PLUGIN_DOCKERFILE) -t ${CONSOLE_PLUGIN_IMAGE} .
+	@echo "Building console image with cache optimization..."
+	@CACHE_FROM=""; \
+	if $(CONTAINER_TOOL) pull $(CONSOLE_PLUGIN_IMAGE_BASE):latest 2>/dev/null; then \
+		CACHE_FROM="--cache-from $(CONSOLE_PLUGIN_IMAGE_BASE):latest"; \
+	fi; \
+	$(CONTAINER_TOOL) build $$CACHE_FROM -f $(CURPATH)/$(CONSOLE_PLUGIN_DOCKERFILE) -t ${CONSOLE_PLUGIN_IMAGE} .
+	$(CONTAINER_TOOL) tag ${CONSOLE_PLUGIN_IMAGE} $(CONSOLE_PLUGIN_IMAGE_BASE):latest
 .PHONY: console-push
 console-push: ## Push the console image
 	$(CONTAINER_TOOL) push $(CONSOLE_PLUGIN_IMAGE)
 
 .PHONY: devicefinder-docker-build
 devicefinder-docker-build: generate-dockerfile-devicefinder ## Build docker image of the devicefinder
-	$(CONTAINER_TOOL) build -t $(DEVICEFINDER_IMAGE) -f $(CURPATH)/${DEVICEFINDER_DOCKERFILE} .
+	@echo "Building devicefinder image with cache optimization..."
+	@CACHE_FROM=""; \
+	if $(CONTAINER_TOOL) pull $(IMAGE_TAG_BASE)-devicefinder:latest 2>/dev/null; then \
+		CACHE_FROM="--cache-from $(IMAGE_TAG_BASE)-devicefinder:latest"; \
+	fi; \
+	$(CONTAINER_TOOL) build $$CACHE_FROM -t $(DEVICEFINDER_IMAGE) -f $(CURPATH)/${DEVICEFINDER_DOCKERFILE} .
+	$(CONTAINER_TOOL) tag $(DEVICEFINDER_IMAGE) $(IMAGE_TAG_BASE)-devicefinder:latest
 
 .PHONY: devicefinder-docker-push
 devicefinder-docker-push: ## Push docker image of the devicefinder
@@ -414,7 +431,12 @@ bundle: manifests kustomize operator-sdk ## Generate bundle manifests and metada
 
 .PHONY: bundle-build
 bundle-build: ## Build the bundle image.
-	$(CONTAINER_TOOL) build -f bundle.Dockerfile -t $(BUNDLE_IMG) .
+	@echo "Building bundle image with cache optimization..."
+	@CACHE_FROM=""; \
+	if $(CONTAINER_TOOL) pull $(IMAGE_TAG_BASE)-bundle:latest 2>/dev/null; then \
+		CACHE_FROM="--cache-from $(IMAGE_TAG_BASE)-bundle:latest"; \
+	fi; \
+	$(CONTAINER_TOOL) build $$CACHE_FROM -f bundle.Dockerfile -t $(BUNDLE_IMG) .
 	$(CONTAINER_TOOL) tag $(BUNDLE_IMG) $(IMAGE_TAG_BASE)-bundle:latest
 
 .PHONY: bundle-push
