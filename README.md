@@ -259,6 +259,8 @@ You can customize the configurations in `.vscode/launch.json` to match your envi
 
 For production or when you need the operator running as a pod in the cluster, you need to build and push a container image.
 
+**📖 For complete build and deployment instructions, see [BUILD_AND_DEPLOY.md](BUILD_AND_DEPLOY.md)**
+
 #### Build and Deploy Workflow
 
 ```bash
