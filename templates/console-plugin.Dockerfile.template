@@ -1,11 +1,15 @@
-FROM registry.access.redhat.com/ubi9/nodejs-20:9.6 AS builder
+FROM registry.access.redhat.com/ubi9/nodejs-22:9.6 AS builder
 
 USER root
 
 # Set Node.js memory options to prevent crashes
-# Note: Using Node.js 20 instead of 22 due to segmentation fault issues with ts-node/webpack in Node.js 22
-# Node.js 20 is still actively maintained and receives security updates
-ENV NODE_OPTIONS="--max-old-space-size=4096"
+# Using Node.js 22 to match Konflux build environment
+# Increased memory limit significantly and disabled problematic optimizations
+# Disable ts-node cache to prevent V8 deserializer errors
+ENV NODE_OPTIONS="--max-old-space-size=6144 --no-warnings"
+ENV NPM_CONFIG_CACHE=/tmp/.npm
+ENV TS_NODE_CACHE=false
+ENV TS_NODE_TRANSPILE_ONLY=true
 
 WORKDIR /opt/app-root/src
 
@@ -13,19 +17,30 @@ WORKDIR /opt/app-root/src
 # This allows npm install to be cached if dependencies haven't changed
 COPY console/package.json console/package-lock.json* ./
 
-# Install dependencies (this layer will be cached if package.json hasn't changed)
-RUN npm ci
+# Clear any existing npm cache and install dependencies
+# Using --prefer-offline to avoid network issues, --no-audit to speed up
+RUN rm -rf /tmp/.npm ~/.npm && \
+    npm ci --prefer-offline --no-audit && \
+    npm cache clean --force
 
 # Now copy the rest of the console code
-# Note: This will overwrite package.json, but we modify it anyway below
-# node_modules from npm ci will be preserved since COPY only adds/updates files
 COPY console/ .
 
 # Replace version in package.json
 RUN sed -r -i "s|\"version\": \"0.0.1\"|\"version\": \"${VERSION}\"|;" ./package.json
 
+# Clear all caches and build artifacts before building
+# This prevents corrupted cache from causing segfaults
+RUN rm -rf dist .ts-node node_modules/.cache && \
+    find . -name "*.tsbuildinfo" -delete 2>/dev/null || true
+
 # Run build with explicit memory settings and production mode
-RUN NODE_ENV=production NODE_OPTIONS="--max-old-space-size=4096" npm run build
+# Using TS_NODE_TRANSPILE_ONLY and TS_NODE_CACHE=false to avoid bytecode caching issues
+RUN NODE_ENV=production \
+    NODE_OPTIONS="--max-old-space-size=6144 --no-warnings" \
+    TS_NODE_CACHE=false \
+    TS_NODE_TRANSPILE_ONLY=true \
+    npm run build
 
 RUN mkdir licenses
 COPY LICENSE licenses/
