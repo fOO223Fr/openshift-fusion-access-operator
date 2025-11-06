@@ -206,13 +206,14 @@ create_catalog_pull_secret() {
             -p='[{"op": "add", "path": "/imagePullSecrets/-", "value": {"name": "quay-pull-secret"}}]' 2>/dev/null || {
             # Check if it's already there
             if oc get serviceaccount default -n openshift-marketplace -o jsonpath='{.imagePullSecrets[*].name}' | grep -q quay-pull-secret; then
-                echo "✅ Pull secret already added to service account"
+                echo "✅ Pull secret already added to default service account"
             else
-                echo "⚠️  Failed to add pull secret to service account (may already exist)"
+                echo "⚠️  Failed to add pull secret to default service account (may already exist)"
             fi
         }
         
         echo "✅ Image pull secret configured for openshift-marketplace namespace"
+        echo "   Note: Pull secret will be added to CatalogSource service account after CatalogSource is created"
     else
         echo "Registry ${REGISTRY_HOST} detected, skipping pull secret setup"
     fi
@@ -328,6 +329,35 @@ cleanup_old_catalogsource "${CATALOGSOURCE}" "openshift-marketplace"
 
 # Install the new CatalogSource
 make VERSION=${VERSION} IMAGE_TAG_BASE=${REGISTRY}/openshift-fusion-access catalog-install
+
+# Add pull secret to CatalogSource service account (OLM creates it when CatalogSource is created)
+# This must be done AFTER CatalogSource creation but BEFORE pod starts pulling
+echo "Ensuring pull secret is added to CatalogSource service account..."
+REGISTRY_HOST=$(echo "${REGISTRY}" | cut -d'/' -f1)
+if [[ "${REGISTRY_HOST}" == "quay.io" ]] && oc get secret quay-pull-secret -n openshift-marketplace &>/dev/null; then
+    # Wait a moment for OLM to create the service account
+    sleep 2
+    # Ensure service account exists
+    oc create serviceaccount "${CATALOGSOURCE}" -n openshift-marketplace --dry-run=client -o yaml | oc apply -f - 2>/dev/null || true
+    # Add pull secret to CatalogSource service account
+    oc patch serviceaccount "${CATALOGSOURCE}" -n openshift-marketplace \
+        --type='json' \
+        -p='[{"op": "add", "path": "/imagePullSecrets/-", "value": {"name": "quay-pull-secret"}}]' 2>/dev/null || {
+        # Check if it's already there
+        if oc get serviceaccount "${CATALOGSOURCE}" -n openshift-marketplace -o jsonpath='{.imagePullSecrets[*].name}' 2>/dev/null | grep -q quay-pull-secret; then
+            echo "✅ Pull secret already added to CatalogSource service account"
+        else
+            echo "⚠️  Adding pull secret to CatalogSource service account..."
+            # Try alternative method if patch fails
+            oc get serviceaccount "${CATALOGSOURCE}" -n openshift-marketplace -o json | \
+                jq '.imagePullSecrets = (.imagePullSecrets // []) + [{"name": "quay-pull-secret"}]' | \
+                oc apply -f - 2>/dev/null || echo "⚠️  Could not add pull secret, you may need to add it manually"
+        fi
+    }
+    # Delete any existing pod to force recreation with new service account config
+    oc delete pod -n openshift-marketplace -l "olm.catalogSource=${CATALOGSOURCE}" --ignore-not-found=true || true
+    echo "✅ Pull secret configured for CatalogSource service account"
+fi
 
 echo "Waiting for CatalogSource to be ready before proceeding..."
 wait_for_catalogsource_ready "${CATALOGSOURCE}" "openshift-marketplace"
