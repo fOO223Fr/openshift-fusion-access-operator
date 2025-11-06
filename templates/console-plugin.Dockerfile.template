@@ -4,12 +4,8 @@ USER root
 
 # Set Node.js memory options to prevent crashes
 # Using Node.js 22 to match Konflux build environment
-# Increased memory limit significantly and disabled problematic optimizations
-# Disable ts-node cache to prevent V8 deserializer errors
-ENV NODE_OPTIONS="--max-old-space-size=6144 --no-warnings"
+ENV NODE_OPTIONS="--max-old-space-size=6144"
 ENV NPM_CONFIG_CACHE=/tmp/.npm
-ENV TS_NODE_CACHE=false
-ENV TS_NODE_TRANSPILE_ONLY=true
 
 WORKDIR /opt/app-root/src
 
@@ -32,15 +28,25 @@ RUN sed -r -i "s|\"version\": \"0.0.1\"|\"version\": \"${VERSION}\"|;" ./package
 # Clear all caches and build artifacts before building
 # This prevents corrupted cache from causing segfaults
 RUN rm -rf dist .ts-node node_modules/.cache && \
-    find . -name "*.tsbuildinfo" -delete 2>/dev/null || true
+    find . -name "*.tsbuildinfo" -delete 2>/dev/null || true && \
+    find node_modules -name ".cache" -type d -exec rm -rf {} + 2>/dev/null || true
+
+# Create a wrapper script that disables ts-node cache and uses transpile-only
+# This avoids the V8 deserializer issues by preventing bytecode caching
+RUN echo '#!/bin/bash' > /tmp/build-webpack.sh && \
+    echo 'set -e' >> /tmp/build-webpack.sh && \
+    echo 'export TS_NODE_CACHE=false' >> /tmp/build-webpack.sh && \
+    echo 'export TS_NODE_TRANSPILE_ONLY=true' >> /tmp/build-webpack.sh && \
+    echo 'export TS_NODE_COMPILER_OPTIONS='"'"'{"module":"commonjs","moduleResolution":"node"}'"'"'' >> /tmp/build-webpack.sh && \
+    echo 'node -r ts-node/register ./node_modules/.bin/webpack -c config/webpack.config.ts' >> /tmp/build-webpack.sh && \
+    chmod +x /tmp/build-webpack.sh
 
 # Run build with explicit memory settings and production mode
-# Using TS_NODE_TRANSPILE_ONLY and TS_NODE_CACHE=false to avoid bytecode caching issues
+# Using wrapper script to ensure ts-node cache is disabled
 RUN NODE_ENV=production \
-    NODE_OPTIONS="--max-old-space-size=6144 --no-warnings" \
-    TS_NODE_CACHE=false \
-    TS_NODE_TRANSPILE_ONLY=true \
-    npm run build
+    NODE_OPTIONS="--max-old-space-size=6144" \
+    npm run clean && \
+    /tmp/build-webpack.sh
 
 RUN mkdir licenses
 COPY LICENSE licenses/
