@@ -2,6 +2,8 @@
 
 This guide covers the complete procedure to build and deploy the Fusion Access Operator on AWS/OpenShift clusters.
 
+**📖 For information about build issues and fixes, see [BUILD_ISSUES_AND_FIXES.md](BUILD_ISSUES_AND_FIXES.md)**
+
 ## Prerequisites
 
 ### Required Tools

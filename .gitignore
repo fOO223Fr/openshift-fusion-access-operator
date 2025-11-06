@@ -54,3 +54,5 @@ govulncheck.results
 artifacts/
 preflight.log
 templates/console-plugin.Dockerfile.template.node20-fallback
+docs/BUILD_AND_DEPLOY.md
+docs/BUILD_ISSUES_AND_FIXES.md
