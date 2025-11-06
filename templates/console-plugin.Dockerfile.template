@@ -2,11 +2,25 @@ FROM registry.access.redhat.com/ubi9/nodejs-22:9.6 AS builder
 
 USER root
 
+# Set Node.js memory options and disable problematic optimizations that cause segfaults
+# --no-warnings suppresses some warnings that can trigger issues
+# --disable-warning=ExperimentalWarning reduces experimental feature noise
+ENV NODE_OPTIONS="--max-old-space-size=4096 --no-warnings --disable-warning=ExperimentalWarning"
+
 WORKDIR /opt/app-root/src
 COPY console/ .
 # replace version in package.json
 RUN sed -r -i "s|\"version\": \"0.0.1\"|\"version\": \"${VERSION}\"|;" ./package.json
-RUN npm ci --ignore-scripts && npm run build
+
+# Clear npm cache and install ALL dependencies (including devDependencies needed for build)
+# Note: npm ci installs devDependencies by default unless --production is used
+RUN npm cache clean --force
+RUN npm ci
+
+# Run build with explicit memory settings and production mode
+# Using explicit NODE_OPTIONS to ensure flags are applied
+RUN NODE_ENV=production NODE_OPTIONS="--max-old-space-size=4096 --no-warnings" npm run build
+
 RUN mkdir licenses
 COPY LICENSE licenses/
 

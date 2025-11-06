@@ -53,3 +53,4 @@ govulncheck.results
 # preflight outputs
 artifacts/
 preflight.log
+templates/console-plugin.Dockerfile.template.node20-fallback
