@@ -226,17 +226,27 @@ cleanup_old_catalogsource() {
     
     # Delete old CatalogSource pods (they will be recreated automatically)
     echo "Deleting old CatalogSource pods..."
-    oc delete pod -n "${namespace}" -l "olm.catalogSource=${catalogsource_name}" --ignore-not-found=true || true
+    oc delete pod -n "${namespace}" -l "olm.catalogSource=${catalogsource_name}" --ignore-not-found=true --wait=true --timeout=30s || true
     
     # Wait a moment for pods to be deleted
     sleep 5
     
     # Delete the CatalogSource itself (it will be recreated by catalog-install)
     echo "Deleting old CatalogSource resource..."
-    oc delete catalogsource "${catalogsource_name}" -n "${namespace}" --ignore-not-found=true || true
+    oc delete catalogsource "${catalogsource_name}" -n "${namespace}" --ignore-not-found=true --wait=true --timeout=30s || true
     
-    # Wait for cleanup to complete
-    sleep 3
+    # Wait for cleanup to complete and ensure pods are gone
+    echo "Waiting for all pods to be deleted..."
+    for i in {1..10}; do
+        if ! oc get pod -n "${namespace}" -l "olm.catalogSource=${catalogsource_name}" &>/dev/null; then
+            break
+        fi
+        echo "   Waiting for pods to be deleted... (attempt $i/10)"
+        sleep 2
+    done
+    
+    # Force delete any remaining pods
+    oc delete pod -n "${namespace}" -l "olm.catalogSource=${catalogsource_name}" --ignore-not-found=true --force --grace-period=0 || true
     
     echo "✅ Cleanup completed"
 }
@@ -325,7 +335,17 @@ verify_catalog_image || echo "⚠️  Image verification failed, continuing anyw
 create_catalog_pull_secret || echo "⚠️  Pull secret setup skipped, ensure images are publicly accessible or configure manually"
 
 # Clean up old CatalogSource resources before creating new ones
+# This must be done BEFORE creating CatalogSource to ensure clean state
 cleanup_old_catalogsource "${CATALOGSOURCE}" "openshift-marketplace"
+
+# Double-check: if CatalogSource still exists, delete it again (might have been recreated)
+if oc get catalogsource "${CATALOGSOURCE}" -n openshift-marketplace &>/dev/null; then
+    echo "⚠️  CatalogSource still exists after cleanup, force deleting..."
+    oc delete catalogsource "${CATALOGSOURCE}" -n openshift-marketplace --ignore-not-found=true --wait=true --timeout=30s || true
+    # Wait and ensure all pods are gone
+    sleep 5
+    oc delete pod -n openshift-marketplace -l "olm.catalogSource=${CATALOGSOURCE}" --ignore-not-found=true --force --grace-period=0 || true
+fi
 
 # Install the new CatalogSource
 make VERSION=${VERSION} IMAGE_TAG_BASE=${REGISTRY}/openshift-fusion-access catalog-install
@@ -354,8 +374,19 @@ if [[ "${REGISTRY_HOST}" == "quay.io" ]] && oc get secret quay-pull-secret -n op
                 oc apply -f - 2>/dev/null || echo "⚠️  Could not add pull secret, you may need to add it manually"
         fi
     }
-    # Delete any existing pod to force recreation with new service account config
-    oc delete pod -n openshift-marketplace -l "olm.catalogSource=${CATALOGSOURCE}" --ignore-not-found=true || true
+    # Delete any existing pods to force recreation with new service account config
+    echo "Deleting any existing CatalogSource pods to force recreation with pull secret..."
+    oc delete pod -n openshift-marketplace -l "olm.catalogSource=${CATALOGSOURCE}" --ignore-not-found=true --wait=true --timeout=30s || true
+    
+    # Force delete any stuck pods
+    for pod in $(oc get pod -n openshift-marketplace -l "olm.catalogSource=${CATALOGSOURCE}" -o name 2>/dev/null || true); do
+        echo "   Force deleting pod: ${pod}"
+        oc delete "${pod}" -n openshift-marketplace --ignore-not-found=true --force --grace-period=0 || true
+    done
+    
+    # Wait a moment for pods to be fully deleted
+    sleep 3
+    
     echo "✅ Pull secret configured for CatalogSource service account"
 fi
 
