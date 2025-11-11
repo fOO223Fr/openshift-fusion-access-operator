@@ -255,50 +255,19 @@ The launch configurations include all required environment variables:
 
 You can customize the configurations in `.vscode/launch.json` to match your environment.
 
-### Deploying Operator as Pod in Cluster (Production Mode)
+### Building and Deploying Operator
 
-For production or when you need the operator running as a pod in the cluster, you need to build and push a container image.
+For building container images and deploying the operator to your cluster:
 
-**📖 For complete build and deployment instructions, see [BUILD_AND_DEPLOY.md](BUILD_AND_DEPLOY.md)**
+**📖 See [docs/BUILD_AND_DEPLOY.md](docs/BUILD_AND_DEPLOY.md) for complete instructions**
 
-#### Build and Deploy Workflow
-
-```bash
-# 1. Set your image registry and tag
-export OPERATOR_IMG=quay.io/your-username/openshift-fusion-access-operator:v1.0.0-dev
-# OR override defaults
-export IMAGE_TAG_BASE=quay.io/your-username/openshift-fusion-access
-export VERSION=1.0.0-dev
-
-# 2. Log in to your container registry
-podman login quay.io  # or docker login
-
-# 3. Build the operator image
-make docker-build
-
-# 4. Push the image to registry
-make docker-push
-
-# 5. Install CRDs
-make install
-
-# 6. Deploy operator to cluster
-DEPLOYMENT_NAMESPACE=ibm-fusion-access \
-RELATED_IMAGE_OPENSHIFT_STORAGE_SCALE_OPERATOR_DEVICEFINDER=quay.io/sughosh/openshift-fusion-access-devicefinder:6.6.7 \
-ENABLE_WEBHOOKS=false \
-make deploy
-```
-
-### Comparison: Local Run vs Deploy
-
-| Aspect | `make run` (Local) | `make deploy` (Cluster) |
-|--------|-------------------|------------------------|
-| **Execution** | Runs on your machine | Runs as pod in cluster |
-| **Build Required** | ❌ No (uses `go run`) | ✅ Yes (needs container image) |
-| **Image Required** | ❌ No | ✅ Yes |
-| **Development Speed** | ⚡ Fast (instant changes) | 🐌 Slower (rebuild/repush needed) |
-| **Use Case** | Development, debugging | Testing, production |
-| **Restart** | Manual (Ctrl+C) | Automatic (via Deployment) |
+The build documentation covers:
+- Automated build and deployment with `fusion-access-operator-build.sh`
+- Manual build process step-by-step
+- Image registry configuration
+- Pull secret setup
+- Troubleshooting common build issues
+- Build stability improvements and fixes
 
 ### Troubleshooting
 
