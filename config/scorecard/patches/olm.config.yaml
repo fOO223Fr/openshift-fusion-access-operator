@@ -48,3 +48,19 @@
     labels:
       suite: olm
       test: olm-status-descriptors-test
+- op: add
+  path: /stages/0/tests/-
+  value:
+    entrypoint:
+    - scorecard-test
+    - enterprise-contract
+    image: quay.io/redhat-appstudio/enterprise-contract-runner:latest
+    labels:
+      suite: enterprise-contract
+      test: enterprise-contract-check
+    storage:
+      spec:
+        mountPath: {}
+    env:
+    - name: SINGLE_COMPONENT
+      value: "true"
